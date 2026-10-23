@@ -1,27 +1,22 @@
 import { getDb } from '../local/db';
+import { ATTENTION_KEYS, attentionOf, fromRemote } from '../local/tickets';
 import { ERROR_MESSAGES } from '../../domain/catalogs';
-import type { ErrorKind, RemoteTicket, SyncOp, Ticket, TicketInput } from '../../domain/types';
+import type { AttentionInput, ErrorKind, RemoteTicket, SyncOp, Ticket } from '../../domain/types';
 import { backoffDelay } from './backoff';
 import { classifyError, SyncError } from './errors';
 
 /** Contrato del repositorio remoto (Supabase en producción, simulado en pruebas). */
 export interface RemoteRepo {
-  createTicket(t: TicketInput & { id: string; created_by: string; technician_id: string }): Promise<RemoteTicket>;
-  updateTicket(id: string, patch: TicketInput, expectedVersion: number): Promise<RemoteTicket>;
+  saveAttention(ticketId: string, expectedVersion: number, operationId: string, input: AttentionInput): Promise<RemoteTicket>;
   getTicket(id: string): Promise<RemoteTicket | null>;
-  listTickets(): Promise<RemoteTicket[]>;
+  listMyTickets(userId: string): Promise<RemoteTicket[]>;
 }
 
 export type RunStatus = 'done' | 'skipped' | 'no-session' | 'owner-mismatch' | 'stopped-offline' | 'stopped-session';
 export interface RunResult { status: RunStatus; confirmed: number; failed: number }
 
 const BLOCKED = Number.MAX_SAFE_INTEGER;
-
-export const toInput = (t: Ticket): TicketInput => ({
-  service_date: t.service_date, service_type: t.service_type, reported_problem: t.reported_problem,
-  diagnosis: t.diagnosis, action_taken: t.action_taken, result: t.result, service_status: t.service_status,
-  observations: t.observations, external_ticket_ref: t.external_ticket_ref,
-});
+const uuid = () => crypto.randomUUID();
 
 export class SyncEngine {
   private running = false;
@@ -69,8 +64,7 @@ export class SyncEngine {
         if (op.nextAttemptAt > this.now()) continue;
         const outcome = await this.processOp(op);
         this.emit();
-        if (outcome === 'ok') result.confirmed++;
-        else result.failed++;
+        if (outcome === 'ok') result.confirmed++; else result.failed++;
         if (outcome === 'stop-offline') { result.status = 'stopped-offline'; break; }
         if (outcome === 'stop-session') { result.status = 'stopped-session'; break; }
       }
@@ -86,7 +80,7 @@ export class SyncEngine {
     const tx = db.transaction(['tickets', 'sync_queue'], 'readwrite');
     for (const op of await tx.objectStore('sync_queue').index('ownerId').getAll(ownerId)) {
       const t = await tx.objectStore('tickets').get(op.ticketId);
-      if (t?.conflictRemote) continue; // los conflictos solo se resuelven explícitamente
+      if (t?.conflict) continue; // los conflictos solo se resuelven explícitamente
       if (op.nextAttemptAt > this.now()) await tx.objectStore('sync_queue').put({ ...op, nextAttemptAt: 0 });
     }
     await tx.done;
@@ -96,37 +90,42 @@ export class SyncEngine {
     const db = await getDb();
     const ticket = await db.get('tickets', op.ticketId);
     if (!ticket) { await db.delete('sync_queue', op.operationId); return 'ok'; }
-
     const sentVersion = ticket.localVersion;
-    const previousAttempts = op.attempts;
-    await this.mark(op, ticket, { syncing: true });
 
     try {
-      let remote: RemoteTicket | null = null;
-      if (op.operationType === 'create') {
-        // Respuesta incierta de un intento previo: comprobar si el servidor ya lo creó.
-        if (previousAttempts > 0) remote = await this.repo.getTicket(ticket.id);
-        if (!remote) remote = await this.repo.createTicket({ ...toInput(ticket), id: ticket.id, created_by: ticket.created_by, technician_id: ticket.technician_id });
-      } else {
-        remote = await this.repo.updateTicket(ticket.id, toInput(ticket), ticket.version);
+      let baseVersion = ticket.version;
+      if (op.attemptOperationId) {
+        // Hubo un intento previo con resultado incierto: ¿el servidor ya lo aplicó?
+        const remote0 = await this.repo.getTicket(ticket.id);
+        if (remote0 && remote0.last_operation_id === op.attemptOperationId) {
+          if (op.attemptLocalVersion === ticket.localVersion) {
+            await this.commitSuccess(op.operationId, ticket.id, sentVersion, remote0);
+            return 'ok'; // la respuesta se perdió pero el cambio sí se guardó: no se reenvía
+          }
+          baseVersion = remote0.version; // se aplicó, pero el técnico editó después: se envía encima
+        }
       }
+      const attemptId = uuid();
+      await this.mark(op, ticket, attemptId, sentVersion);
+      const remote = await this.repo.saveAttention(ticket.id, baseVersion, attemptId, attentionOf(ticket));
       await this.commitSuccess(op.operationId, ticket.id, sentVersion, remote);
       return 'ok';
     } catch (err) {
       const kind: ErrorKind = classifyError(err);
-      await this.commitFailure(op.operationId, ticket.id, kind, err instanceof SyncError ? err.remote : null);
+      const se = err instanceof SyncError ? err : null;
+      await this.commitFailure(op.operationId, ticket.id, kind, se?.remote ?? null, se?.reason ?? null);
       if (kind === 'offline') return 'stop-offline';
       if (kind === 'session') return 'stop-session';
       return 'fail';
     }
   }
 
-  private async mark(op: SyncOp, ticket: Ticket, o: { syncing: boolean }) {
+  private async mark(op: SyncOp, ticket: Ticket, attemptId: string, sentVersion: number) {
     const db = await getDb();
     const tx = db.transaction(['tickets', 'sync_queue'], 'readwrite');
     await Promise.all([
-      tx.objectStore('tickets').put({ ...ticket, syncStatus: o.syncing ? 'syncing' : ticket.syncStatus, lastSyncAttemptAt: this.now() }),
-      tx.objectStore('sync_queue').put({ ...op, attempts: op.attempts + 1 }),
+      tx.objectStore('tickets').put({ ...ticket, syncStatus: 'syncing', lastSyncAttemptAt: this.now() }),
+      tx.objectStore('sync_queue').put({ ...op, attempts: op.attempts + 1, attemptOperationId: attemptId, attemptLocalVersion: sentVersion }),
       tx.done,
     ]);
   }
@@ -138,46 +137,45 @@ export class SyncEngine {
     const t = await tx.objectStore('tickets').get(ticketId);
     const op = await tx.objectStore('sync_queue').get(opId);
     if (!t) { await tx.done; return; }
-    const confirmedFields = {
-      folio: remote.folio, version: remote.version, created_at: remote.created_at,
-      updated_at: remote.updated_at, serverUpdatedAt: remote.updated_at,
-    };
     if (t.localVersion === sentVersion) {
       await Promise.all([
-        tx.objectStore('tickets').put({ ...t, ...confirmedFields, syncStatus: 'synced', syncAttempts: 0, lastSyncError: null, lastSyncErrorKind: null }),
+        tx.objectStore('tickets').put({ ...fromRemote(remote, t.ownerId), localVersion: t.localVersion }),
         tx.objectStore('sync_queue').delete(opId),
         tx.done,
       ]);
     } else {
-      // El técnico editó mientras se enviaba: queda pendiente una actualización con la última versión.
+      // El técnico siguió editando durante el envío: se conserva lo local y queda otra operación pendiente.
+      const mine = Object.fromEntries(ATTENTION_KEYS.map((k) => [k, t[k]]));
       await Promise.all([
-        tx.objectStore('tickets').put({ ...t, ...confirmedFields, syncStatus: 'pending', syncAttempts: 0, lastSyncError: null, lastSyncErrorKind: null }),
-        op ? tx.objectStore('sync_queue').put({ ...op, operationType: 'update', attempts: 0, nextAttemptAt: 0, lastError: null, payloadVersion: t.localVersion }) : Promise.resolve(),
+        tx.objectStore('tickets').put({ ...t, ...remote, ...mine, serverUpdatedAt: remote.updated_at, syncStatus: 'pending',
+          syncAttempts: 0, lastSyncError: null, lastSyncErrorKind: null, hasLocalChanges: true }),
+        op ? tx.objectStore('sync_queue').put({ ...op, attempts: 0, nextAttemptAt: 0, lastError: null, payloadVersion: t.localVersion,
+          attemptOperationId: null, attemptLocalVersion: null }) : Promise.resolve(),
         tx.done,
       ]);
     }
   }
 
   /** Nunca borra datos locales: solo reprograma o bloquea según el tipo de error. */
-  private async commitFailure(opId: string, ticketId: string, kind: ErrorKind, remote: RemoteTicket | null) {
+  private async commitFailure(opId: string, ticketId: string, kind: ErrorKind, remote: RemoteTicket | null, reason: import('../../domain/types').ConflictReason | null) {
     const db = await getDb();
     const tx = db.transaction(['tickets', 'sync_queue'], 'readwrite');
     const t = await tx.objectStore('tickets').get(ticketId);
     const op = await tx.objectStore('sync_queue').get(opId);
     if (!t || !op) { await tx.done; return; }
-    const msg = ERROR_MESSAGES[kind];
     const retryable = kind === 'offline' || kind === 'temporary' || kind === 'session';
     const nextAttemptAt = retryable ? (kind === 'session' ? 0 : this.now() + backoffDelay(op.attempts)) : BLOCKED;
+    let conflict = t.conflict;
+    if (kind === 'conflict') {
+      // La razón se deduce del estado real del servidor (el servidor revisa la versión antes que el estado).
+      const r: import('../../domain/types').ConflictReason = remote && remote.technician_id !== t.ownerId ? 'reassigned'
+        : remote && !['assigned', 'in_progress'].includes(remote.service_status) ? 'closed' : reason ?? 'version';
+      conflict = { reason: r, remote };
+    }
     await Promise.all([
-      tx.objectStore('tickets').put({
-        ...t,
-        syncStatus: retryable ? 'pending' : 'error',
-        syncAttempts: op.attempts,
-        lastSyncError: msg,
-        lastSyncErrorKind: kind,
-        conflictRemote: kind === 'conflict' ? remote : t.conflictRemote,
-      }),
-      tx.objectStore('sync_queue').put({ ...op, nextAttemptAt, lastError: msg }),
+      tx.objectStore('tickets').put({ ...t, syncStatus: retryable ? 'pending' : 'error', syncAttempts: op.attempts,
+        lastSyncError: ERROR_MESSAGES[kind], lastSyncErrorKind: kind, conflict }),
+      tx.objectStore('sync_queue').put({ ...op, nextAttemptAt, lastError: ERROR_MESSAGES[kind] }),
       tx.done,
     ]);
   }

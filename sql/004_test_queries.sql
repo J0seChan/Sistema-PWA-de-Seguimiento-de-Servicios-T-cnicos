@@ -1,3 +1,5 @@
+-- ⚠ OBSOLETO desde la fase 2: estas pruebas asumen que el técnico inserta tickets directamente,
+-- cosa que 009_ticket_rpc_and_rls.sql ya no permite. Usa sql/010_test_queries.sql.
 -- =====================================================================
 -- Link Redes Servicios · 004_test_queries.sql
 -- Verificaciones MANUALES de RLS desde el editor SQL de Supabase.

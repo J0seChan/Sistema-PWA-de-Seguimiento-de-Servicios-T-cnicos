@@ -1,26 +1,16 @@
 # Arquitectura
 
-Vite + TypeScript sin framework, HTML/CSS propios. Dependencias en producción: `@supabase/supabase-js` e `idb` (envoltorio mínimo de IndexedDB). No se agregaron más.
+Vite + TypeScript sin framework. Dependencias de producción: `@supabase/supabase-js` e `idb`.
 
 ```
-UI (views.ts, main.ts)
-   │ usa
-   ├─ services/local   → IndexedDB: guardado inmediato, cola persistente
-   ├─ services/sync    → motor: cola → repositorio remoto → confirma → actualiza local
-   ├─ services/remote  → Supabase (único lugar con consultas remotas)
-   └─ services/auth    → sesión, perfil, identidad conocida offline
+UI (app/views*.ts, main.ts)
+ ├─ técnico:  services/local (IndexedDB) → services/sync (cola, reintentos) → services/remote/repository (RPC save_ticket_attention)
+ ├─ oficina/admin: services/remote/office.ts (en línea: RPC + consultas paginadas) 
+ ├─ services/auth: sesión, perfil, identidad conocida offline
+ └─ supabase/functions/admin-users: Edge Function (única que usa service_role)
+PostgreSQL: tablas + RLS + funciones SECURITY DEFINER (escritura) + triggers + bitácora
 ```
-
-- **Guardar siempre es local primero** (transacción única ticket + operación en cola); luego se intenta sincronizar.
-- El motor depende de la interfaz `RemoteRepo`, por eso se prueba con un servidor simulado.
-- **Offline**: el Service Worker precachea el shell (lista generada en el build). Solo atiende el mismo origen; nunca cachea respuestas de Supabase.
-- **Sesión offline**: se guarda en `localStorage` solo la identidad conocida (id, nombre, rol) para abrir los datos locales. No hay contraseñas guardadas ni autenticación offline. Riesgo: quien tenga el teléfono desbloqueado puede ver los servicios del último usuario hasta que cierre sesión.
-- **Cambio de usuario**: cada registro y operación lleva `ownerId`; las pantallas y el motor solo ven los del usuario actual. Cerrar sesión no borra datos pendientes.
-- **Enrutado por hash** (`#/history`, `#/ticket/<id>`) por compatibilidad con GitHub Pages.
-
-## Decisiones tomadas
-
-- Obligatoriedad por estado: siempre fecha, tipo, estado y problema; si está *Completado*, también diagnóstico, acción y resultado (también lo exige la base de datos).
-- El payload no se copia a la cola: la operación apunta al servicio y se envía su última versión (editar un pendiente nunca duplica).
-- Folio `SRV-AAAA-NNNNNN` con año en hora de Ciudad de México.
-- Cierre de sesión con pendientes: pide confirmación y conserva los datos.
+- La seguridad vive en PostgreSQL; la interfaz solo oculta opciones por comodidad.
+- El motor de sincronización depende de la interfaz `RemoteRepo` (probado con servidor simulado).
+- Rutas por hash (`#/ticket/<id>`, `#/view/<id>`, `#/client/<id>`…) por compatibilidad con GitHub Pages. Rutas de oficina (`#/new`, `#/tickets`, `#/users`) las atiende un rol de oficina/admin; un técnico que las escriba vuelve al inicio, y aunque llegara, el servidor rechaza sus operaciones.
+- Service Worker: precachea el shell; nunca cachea respuestas de Supabase.

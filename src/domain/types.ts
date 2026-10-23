@@ -1,44 +1,73 @@
 export type ServiceType = 'installation' | 'support' | 'failure' | 'expansion' | 'address_change' | 'modem_change';
-export type ServiceStatus = 'open' | 'in_progress' | 'completed';
+/** Estado OPERATIVO del ticket (independiente del estado de sincronización). */
+export type TicketStatus = 'unassigned' | 'assigned' | 'in_progress' | 'completed' | 'cancelled';
 export type SyncStatus = 'pending' | 'syncing' | 'synced' | 'error';
 export type ErrorKind = 'offline' | 'session' | 'permission' | 'validation' | 'conflict' | 'temporary' | 'unknown';
-export type Role = 'technician' | 'supervisor' | 'admin';
+export type ConflictReason = 'version' | 'reassigned' | 'closed';
+export type Role = 'technician' | 'dispatcher' | 'admin';
 
-/** Campos que captura el técnico (y que viajan al servidor). */
-export interface TicketInput {
-  service_date: string; // ISO
-  service_type: ServiceType;
-  reported_problem: string;
-  diagnosis: string | null;
-  action_taken: string | null;
-  result: string | null;
-  service_status: ServiceStatus;
-  observations: string | null;
-  external_ticket_ref: string | null;
-}
-
-/** Fila tal como existe en Supabase. */
-export interface RemoteTicket extends TicketInput {
+export interface Client {
   id: string;
-  folio: string;
-  created_by: string;
-  technician_id: string;
+  pppoe_username: string;
+  full_name: string | null;
+  address: string;
+  address_reference: string | null;
+  contact_phone: string | null;
   created_at: string;
   updated_at: string;
   version: number;
 }
 
-/** Registro local: campos del servidor + metadatos de sincronización. */
-export interface Ticket extends TicketInput {
+/** Fila de public.service_tickets tal como la confirma el servidor. */
+export interface RemoteTicket {
   id: string;
-  folio: string | null;
+  folio: string;
   created_by: string;
-  technician_id: string;
-  created_at: string | null;
-  updated_at: string | null;
-  version: number; // última versión confirmada por el servidor (0 = nunca sincronizado)
+  technician_id: string | null;
+  technician_name: string | null;
+  client_id: string | null;
+  client_pppoe_snapshot: string | null;
+  client_name_snapshot: string | null;
+  client_address_snapshot: string | null;
+  client_reference_snapshot: string | null;
+  external_ticket_ref: string | null;
+  service_date: string;
+  service_type: ServiceType;
+  reported_problem: string;
+  diagnosis: string | null;
+  action_taken: string | null;
+  result: string | null;
+  service_status: TicketStatus;
+  observations: string | null;
+  pppoe_confirmed: boolean;
+  address_confirmed: boolean;
+  discrepancy_notes: string | null;
+  assigned_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  version: number;
+  last_operation_id: string | null;
+}
+
+/** Lo único que el técnico puede registrar (campos de atención). */
+export interface AttentionInput {
+  status: 'in_progress' | 'completed';
+  pppoe_confirmed: boolean;
+  address_confirmed: boolean;
+  discrepancy_notes: string | null;
+  diagnosis: string | null;
+  action_taken: string | null;
+  result: string | null;
+  observations: string | null;
+}
+
+export interface Conflict { reason: ConflictReason; remote: RemoteTicket | null }
+
+/** Ticket en el dispositivo del técnico: copia del servidor + cambios locales + metadatos de sync. */
+export interface Ticket extends RemoteTicket {
   ownerId: string;
-  technicianName: string;
   syncStatus: SyncStatus;
   syncAttempts: number;
   lastSyncAttemptAt: number | null;
@@ -47,19 +76,22 @@ export interface Ticket extends TicketInput {
   localUpdatedAt: number;
   serverUpdatedAt: string | null;
   localVersion: number;
-  conflictRemote: RemoteTicket | null;
+  hasLocalChanges: boolean;
+  conflict: Conflict | null;
 }
 
 export interface SyncOp {
   operationId: string;
   ticketId: string;
   ownerId: string;
-  operationType: 'create' | 'update';
   createdAt: number;
   attempts: number;
   nextAttemptAt: number;
   lastError: string | null;
   payloadVersion: number;
+  /** Id enviado al servidor en el último intento y versión local que se envió (para detectar "se aplicó pero la respuesta se perdió"). */
+  attemptOperationId: string | null;
+  attemptLocalVersion: number | null;
 }
 
 export interface AppUser {
@@ -68,3 +100,6 @@ export interface AppUser {
   role: Role;
   active: boolean;
 }
+
+export interface Technician { id: string; full_name: string }
+export interface UserRow { id: string; full_name: string; role: Role; active: boolean }

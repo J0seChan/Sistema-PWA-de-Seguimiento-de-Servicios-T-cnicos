@@ -116,3 +116,20 @@ dl.kv dt { font-size: .8rem; color: var(--muted); font-weight: 600; } dl.kv dd {
   body { background: #fff !important; padding: 0; } .orbs, .no-print, .toast { display: none !important; }
   #app { max-width: none; padding: 0; } .sheet { box-shadow: none; border-radius: 0; padding: 0; }
 }
+
+/* ---- Fase 2: navegación, panel de oficina, bitácora ---- */
+.nav { display: flex; gap: 6px; padding: 8px; margin-bottom: 14px; overflow-x: auto; border-radius: 18px; }
+.nav a, .linklike { padding: 10px 14px; border-radius: 12px; text-decoration: none; color: var(--text); font-weight: 600; white-space: nowrap; font-size: .92rem; }
+.nav a[aria-current="page"] { background: var(--accent); color: var(--accent-ink); }
+.linklike { background: none; border: 0; font: inherit; cursor: pointer; text-decoration: underline; margin-left: auto; }
+.banner .linklike { margin-left: 0; padding: 0; }
+.stats5 { grid-template-columns: repeat(2, 1fr); } @media (min-width: 560px) { .stats5 { grid-template-columns: repeat(5, 1fr); } }
+a.stat { color: inherit; text-decoration: none; }
+fieldset { border: 1px solid var(--glass-border); border-radius: var(--radius-sm); padding: 14px; margin: 0; min-width: 0; }
+legend { font-weight: 700; padding: 0 6px; }
+label.check { display: flex; align-items: center; gap: 10px; } label.check input { width: 24px; height: 24px; min-height: 0; flex: none; }
+details > summary { cursor: pointer; list-style: none; display: inline-flex; } details[open] > summary { margin-bottom: 12px; }
+.timeline { margin: 0; padding-left: 18px; display: grid; gap: 10px; }
+.user-form select { width: auto; min-height: 44px; }
+.hidden { display: none; }
+.linkbtn { width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer; }

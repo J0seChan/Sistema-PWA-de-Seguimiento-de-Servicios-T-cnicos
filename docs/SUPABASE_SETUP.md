@@ -1,39 +1,65 @@
-# Configuración manual de Supabase
+# Configuración de Supabase — Fase 2
 
-Todo esto lo haces tú; la app y estos archivos **no** ejecutan nada contra Supabase por su cuenta. Usa un proyecto **nuevo e independiente de Monitor ISP**.
+La fase 1 (proyecto, claves, `001`–`003`) ya la hiciste. Esta guía añade **oficina, clientes, asignación, folios `LR-` y administración de usuarios**. Todo se ejecuta **a mano**: la aplicación y estos archivos no tocan Supabase por su cuenta.
 
-1. **Crear el proyecto** en supabase.com (región cercana a México). Guarda la contraseña de la base de datos en un gestor de contraseñas, no en el repo.
-2. **Obtener credenciales**: *Project Settings → API*: copia la **Project URL** y la clave **publicable** (o `anon` en proyectos con claves heredadas; son equivalentes para el cliente). **No** copies `service_role`.
-3. **Variables locales**: `cp .env.example .env` y pega ambos valores en `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`.
-4. **Desactivar el registro público**: *Authentication → Sign In / Providers → Email*: desactiva *Allow new users to sign up*. Los usuarios los creas tú.
-5. **Ejecutar el SQL**, en este orden, desde *SQL Editor* (léelo antes; es idempotente y no destructivo):
-   1. `sql/001_schema.sql` — tablas y restricciones
-   2. `sql/002_functions_and_triggers.sql` — folios `SRV-AAAA-NNNNNN`, versión, protección de campos
-   3. `sql/003_rls_policies.sql` — RLS y permisos
-6. **Verificar RLS**: *Table Editor* debe mostrar `RLS enabled` en `profiles`, `folio_counters` y `service_tickets`.
-7. **Crear usuarios de prueba**: *Authentication → Users → Add user* (marca *Auto Confirm User*). Crea al menos **dos técnicos** (A y B) y copia sus UUID.
-8. **Crear perfiles y roles** (SQL Editor; sin sesión de usuario, esto es el "procedimiento administrativo autorizado"):
-   ```sql
-   insert into public.profiles (id, full_name, role) values
-     ('UUID_TECNICO_A', 'Técnico A', 'technician'),
-     ('UUID_TECNICO_B', 'Técnico B', 'technician');
-   -- Primer administrador (opcional):
-   -- insert into public.profiles (id, full_name, role) values ('UUID_ADMIN', 'Admin', 'admin');
-   ```
-9. **Probar con una cuenta técnica**: inicia sesión en la PWA, crea un servicio, sincroniza y revisa que aparezca con folio en `service_tickets`.
-10. **Probar aislamiento**: ejecuta los bloques de `sql/004_test_queries.sql` (cada uno termina en `ROLLBACK`) y compara con el resultado `ESPERADO` de cada uno.
-11. **Errores esperados sin permisos**: sin sesión, `anon` recibe `permission denied`; un técnico no ve ni modifica servicios ajenos.
-12. **URL de producción**: cuando despliegues, en *Authentication → URL Configuration* agrega la URL de GitHub Pages (`https://USUARIO.github.io/REPO/`) como *Site URL*.
+> ⚠ Antes de empezar haz un respaldo (*Database → Backups*, o exporta tus tablas). Las migraciones **modifican datos**: los perfiles `supervisor` pasan a `dispatcher` y los tickets `open` pasan a `assigned`. No borran nada.
 
-## Desactivar o cambiar el rol de un usuario (solo desde SQL Editor)
+## 1. Ejecutar las migraciones (SQL Editor, en este orden)
 
+Abre cada archivo de `sql/`, copia **todo** su contenido y pulsa **Run**. Cada una se puede ejecutar más de una vez.
+
+| # | Archivo | Qué hace |
+|---|---|---|
+| 1 | `005_roles_and_profiles.sql` | Roles `technician`/`dispatcher`/`admin`; `supervisor`→`dispatcher`; **creación automática de perfiles** (inactivos); relleno de usuarios sin perfil |
+| 2 | `006_clients_and_ticket_fields.sql` | Tabla `clients`; campos nuevos y estados de `service_tickets` |
+| 3 | `007_ticket_folio_generation.sql` | Folio `LR-AAAA-NNNNNN` |
+| 4 | `008_ticket_events.sql` | Bitácora inmutable `ticket_events` |
+| 5 | `009_ticket_rpc_and_rls.sql` | Permisos, RLS y funciones de escritura |
+
+Si Supabase avisa de "operaciones potencialmente destructivas", es por `drop constraint/policy if exists` de objetos propios de este proyecto: puedes confirmar.
+
+**Verificación rápida tras la 009:**
 ```sql
-update public.profiles set active = false where id = 'UUID';        -- bloquea nuevas operaciones remotas
-update public.profiles set role = 'supervisor' where id = 'UUID';
+select service_status, count(*) from public.service_tickets group by 1;
+select full_name, role, active from public.profiles order by created_at;
+select tablename, rowsecurity from pg_tables where schemaname = 'public';   -- todo en true
 ```
 
-## Notas
+## 2. Crear el primer administrador
 
-- Folio: `SRV-` + año (hora de Ciudad de México) + consecutivo de 6 dígitos, con contador atómico en `folio_counters`.
-- `supervisor` y `admin` pueden **leer** todos los servicios; no hay panel en el MVP.
-- No hay política `DELETE`: los servicios no se borran físicamente.
+1. *Authentication → Users*: usa un usuario existente o crea uno (*Add user*, *Auto Confirm User*). El trigger de la 005 crea su perfil **inactivo** como técnico.
+2. Conviértelo en admin (solo esta vez desde SQL; después lo haces desde el panel):
+   ```sql
+   select id, email from auth.users;                                   -- copia el UUID
+   update public.profiles set role = 'admin', active = true where id = 'UUID_DEL_ADMIN';
+   ```
+3. Tus usuarios de prueba anteriores conservan su rol; si alguno era `supervisor` ahora es `dispatcher`.
+
+## 3. Desplegar la Edge Function `admin-users` (panel de administración)
+
+La función usa la clave `service_role`, que **Supabase inyecta como secreto del entorno de la función**; nunca va a la PWA ni a GitHub.
+
+**Con el Dashboard:** *Edge Functions → Deploy a new function → Via Editor* → nombre exacto **`admin-users`** → pega el contenido de `supabase/functions/admin-users/index.ts` → **Deploy**. Deja activada la opción *Verify JWT*.
+
+**Con la CLI (opcional):** `supabase login`, `supabase link --project-ref TU_REF`, `supabase functions deploy admin-users`.
+
+No necesitas crear secretos: `SUPABASE_URL`, `SUPABASE_ANON_KEY` y `SUPABASE_SERVICE_ROLE_KEY` ya existen dentro de las funciones.
+
+## 4. Crear usuarios y asignar roles
+
+Entra a la PWA como admin → **Usuarios**: crea oficina y técnicos (nombre, correo, contraseña inicial de 10+ caracteres, rol) y cambia rol o activa/desactiva. Un admin no puede degradarse ni desactivarse a sí mismo. Si prefieres SQL, el trigger ya crea el perfil inactivo y solo debes activarlo con el rol correcto:
+```sql
+update public.profiles set role = 'dispatcher', active = true where id = 'UUID';
+```
+
+## 5. Verificar seguridad
+
+Corre `sql/010_test_queries.sql` (con tus UUID) y compara con cada `ESPERADO`. Luego prueba desde la PWA cada rol (ver `docs/ROLES_AND_SECURITY.md`).
+
+## 6. Folios
+
+El primer ticket `LR-` continúa el contador del año (si hay N tickets de prueba, será `LR-AAAA-(N+1)`). Si ya borraste los tickets de prueba y quieres empezar en 000001, ejecuta la línea opcional al final de `007`.
+
+## 7. GitHub
+
+No hay variables nuevas (`VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY` siguen igual). Sube el código y el flujo de Actions publica. En los teléfonos que ya tenían la PWA, aparecerá "Hay una versión nueva → Actualizar".

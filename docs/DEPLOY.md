@@ -14,3 +14,6 @@
 El build usa rutas relativas (`base: './'`) y enrutado por `#`, por eso funciona bajo `/REPO/` sin configurar nada y sin 404 al recargar.
 
 Para publicar una versión nueva basta con un push; los usuarios verán el aviso "Hay una versión nueva" y deciden cuándo actualizar.
+
+## Fase 2
+No hay variables nuevas en GitHub. La Edge Function `admin-users` se despliega **en Supabase** (ver `docs/SUPABASE_SETUP.md`, paso 3), no en GitHub Pages.
